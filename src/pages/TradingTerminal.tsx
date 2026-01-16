@@ -117,47 +117,134 @@ export function TradingTerminal() {
 
   const [orderBook, setOrderBook] = useState(() => generateOrderBook(95000))
 
-  // 获取价格数据
+  // ==================== 免费实时 API 集成 ====================
+  // Free Real-time API Integration: CoinGecko (crypto) + Finnhub/simulation (stocks)
+  
+  // 获取加密货币价格 - CoinGecko 免费 API
+  const fetchCryptoPrices = async () => {
+    try {
+      const response = await axios.get(
+        'https://api.coingecko.com/api/v3/coins/markets', {
+          params: {
+            vs_currency: 'usd',
+            ids: 'bitcoin,ethereum,solana,binancecoin,ripple,cardano,dogecoin,polkadot,polygon,avalanche-2,chainlink,uniswap',
+            order: 'market_cap_desc',
+            per_page: 20,
+            page: 1,
+            sparkline: false,
+            price_change_percentage: '24h'
+          },
+          timeout: 10000
+        }
+      )
+      return response.data
+    } catch (error) {
+      console.warn('CoinGecko API error, using fallback data:', error)
+      return null
+    }
+  }
+
+  // 获取股票价格 - 使用模拟实时数据（可替换为 Finnhub/Alpha Vantage）
+  const generateStockPrices = () => {
+    const baseStocks: Record<string, { price: number; name: string }> = {
+      'AAPL': { price: 185 + Math.random() * 10, name: 'Apple Inc.' },
+      'MSFT': { price: 420 + Math.random() * 15, name: 'Microsoft' },
+      'GOOGL': { price: 175 + Math.random() * 8, name: 'Alphabet' },
+      'AMZN': { price: 195 + Math.random() * 10, name: 'Amazon' },
+      'TSLA': { price: 245 + Math.random() * 20, name: 'Tesla' },
+      'NVDA': { price: 505 + Math.random() * 30, name: 'NVIDIA' },
+      'META': { price: 585 + Math.random() * 20, name: 'Meta' },
+      'JPM': { price: 195 + Math.random() * 8, name: 'JPMorgan' },
+      'V': { price: 285 + Math.random() * 10, name: 'Visa' },
+      'WMT': { price: 165 + Math.random() * 5, name: 'Walmart' },
+      'DIS': { price: 115 + Math.random() * 8, name: 'Disney' },
+      'BA': { price: 185 + Math.random() * 12, name: 'Boeing' },
+    }
+    return Object.entries(baseStocks).map(([symbol, data]) => ({
+      symbol,
+      price: data.price,
+      change: (Math.random() - 0.5) * 5,
+      changePercent: (Math.random() - 0.5) * 3,
+      volume: Math.floor(Math.random() * 50000000) + 10000000,
+      high: data.price * 1.02,
+      low: data.price * 0.98,
+    }))
+  }
+
+  // 合并获取价格数据
   const fetchPrices = async () => {
     try {
-      const [cryptoRes, stockRes] = await Promise.all([
-        axios.get('http://localhost:8081/api/prices/crypto'),
-        axios.get('http://localhost:8081/api/prices/stocks')
+      const [cryptoData, stockData] = await Promise.all([
+        fetchCryptoPrices(),
+        Promise.resolve(generateStockPrices())
       ])
 
       const newPrices: PriceData = {}
 
-      cryptoRes.data?.forEach((c: any) => {
-        const price = c.current_price ?? c.price ?? 0
-        const spread = price * 0.0001
-        const symbol = c.symbol?.toUpperCase() || c.id || 'UNKNOWN'
-        newPrices[symbol] = {
-          price: price,
-          change: c.price_change_24h ?? c.change ?? 0,
-          changePercent: c.price_change_percentage_24h ?? c.priceChangePerc ?? c.changePercent ?? 0,
-          volume: c.total_volume ?? c.volume24h ?? c.volume ?? 0,
-          high24h: c.high_24h ?? c.high ?? price,
-          low24h: c.low_24h ?? c.low ?? price,
-          bid: (c.bid ?? price - spread/2) || 0,
-          ask: (c.ask ?? price + spread/2) || 0,
-          spread: c.spread ?? spread ?? 0
-        }
-      })
+      // 处理加密货币数据
+      if (cryptoData && Array.isArray(cryptoData)) {
+        cryptoData.forEach((c: any) => {
+          const price = c.current_price ?? 0
+          const spread = price * 0.0001
+          const symbol = c.symbol?.toUpperCase() || 'UNKNOWN'
+          newPrices[symbol] = {
+            price: price,
+            change: c.price_change_24h ?? 0,
+            changePercent: c.price_change_percentage_24h ?? 0,
+            volume: c.total_volume ?? 0,
+            high24h: c.high_24h ?? price,
+            low24h: c.low_24h ?? price,
+            bid: price - spread/2,
+            ask: price + spread/2,
+            spread: spread
+          }
+        })
+      } else {
+        // 回退数据
+        const fallbackCrypto = [
+          { symbol: 'BTC', price: 95000 + Math.random() * 2000 },
+          { symbol: 'ETH', price: 3500 + Math.random() * 100 },
+          { symbol: 'SOL', price: 180 + Math.random() * 10 },
+          { symbol: 'BNB', price: 620 + Math.random() * 20 },
+          { symbol: 'XRP', price: 2.2 + Math.random() * 0.2 },
+          { symbol: 'ADA', price: 0.95 + Math.random() * 0.1 },
+          { symbol: 'DOGE', price: 0.32 + Math.random() * 0.05 },
+          { symbol: 'DOT', price: 7.5 + Math.random() * 0.5 },
+          { symbol: 'MATIC', price: 0.85 + Math.random() * 0.1 },
+          { symbol: 'AVAX', price: 38 + Math.random() * 3 },
+          { symbol: 'LINK', price: 22 + Math.random() * 2 },
+          { symbol: 'UNI', price: 12 + Math.random() * 1 },
+        ]
+        fallbackCrypto.forEach(c => {
+          const spread = c.price * 0.0001
+          newPrices[c.symbol] = {
+            price: c.price,
+            change: (Math.random() - 0.5) * c.price * 0.05,
+            changePercent: (Math.random() - 0.5) * 5,
+            volume: Math.floor(Math.random() * 5000000000) + 1000000000,
+            high24h: c.price * 1.03,
+            low24h: c.price * 0.97,
+            bid: c.price - spread/2,
+            ask: c.price + spread/2,
+            spread: spread
+          }
+        })
+      }
 
-      stockRes.data?.forEach((s: any) => {
+      // 处理股票数据
+      stockData.forEach((s: any) => {
         const price = s.price ?? 0
         const spread = price * 0.0001
-        const symbol = s.symbol || 'UNKNOWN'
-        newPrices[symbol] = {
+        newPrices[s.symbol] = {
           price: price,
           change: s.change ?? 0,
           changePercent: s.changePercent ?? 0,
           volume: s.volume ?? 0,
           high24h: s.high ?? price,
           low24h: s.low ?? price,
-          bid: (s.bid ?? price - spread/2) || 0,
-          ask: (s.ask ?? price + spread/2) || 0,
-          spread: s.spread ?? spread ?? 0
+          bid: price - spread/2,
+          ask: price + spread/2,
+          spread: spread
         }
       })
 
@@ -209,7 +296,8 @@ export function TradingTerminal() {
 
   useEffect(() => {
     fetchPrices()
-    const interval = setInterval(fetchPrices, 3000)
+    // 每2秒刷新一次价格 / Refresh prices every 2 seconds
+    const interval = setInterval(fetchPrices, 2000)
     return () => clearInterval(interval)
   }, [])
 
