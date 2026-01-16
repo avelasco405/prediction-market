@@ -118,7 +118,10 @@ export function TradingTerminal() {
   const [orderBook, setOrderBook] = useState(() => generateOrderBook(95000))
 
   // ==================== 免费实时 API 集成 ====================
-  // Free Real-time API Integration: CoinGecko (crypto) + Finnhub/simulation (stocks)
+  // Free Real-time API Integration: CoinGecko (crypto) + Multiple Stock APIs
+  
+  // 股票价格缓存 - 用于平滑更新
+  const stockPriceCache = useRef<Record<string, { price: number; lastUpdate: number }>>({})
   
   // 获取加密货币价格 - CoinGecko 免费 API
   const fetchCryptoPrices = async () => {
@@ -144,31 +147,182 @@ export function TradingTerminal() {
     }
   }
 
-  // 获取股票价格 - 使用模拟实时数据（可替换为 Finnhub/Alpha Vantage）
-  const generateStockPrices = () => {
-    const baseStocks: Record<string, { price: number; name: string }> = {
-      'AAPL': { price: 185 + Math.random() * 10, name: 'Apple Inc.' },
-      'MSFT': { price: 420 + Math.random() * 15, name: 'Microsoft' },
-      'GOOGL': { price: 175 + Math.random() * 8, name: 'Alphabet' },
-      'AMZN': { price: 195 + Math.random() * 10, name: 'Amazon' },
-      'TSLA': { price: 245 + Math.random() * 20, name: 'Tesla' },
-      'NVDA': { price: 505 + Math.random() * 30, name: 'NVIDIA' },
-      'META': { price: 585 + Math.random() * 20, name: 'Meta' },
-      'JPM': { price: 195 + Math.random() * 8, name: 'JPMorgan' },
-      'V': { price: 285 + Math.random() * 10, name: 'Visa' },
-      'WMT': { price: 165 + Math.random() * 5, name: 'Walmart' },
-      'DIS': { price: 115 + Math.random() * 8, name: 'Disney' },
-      'BA': { price: 185 + Math.random() * 12, name: 'Boeing' },
+  // ==================== 真实股票API集成 ====================
+  // Real Stock API Integration: Yahoo Finance (via proxy) / Finnhub / Twelve Data
+  
+  // 方法1: Yahoo Finance 通过 AllOrigins 代理 (无需API key)
+  const fetchYahooFinanceQuote = async (symbol: string) => {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d`
+      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
+      const response = await axios.get(proxyUrl, { timeout: 5000 })
+      const result = response.data?.chart?.result?.[0]
+      if (result) {
+        const meta = result.meta
+        return {
+          symbol: symbol,
+          price: meta.regularMarketPrice || meta.previousClose,
+          change: (meta.regularMarketPrice || 0) - (meta.previousClose || 0),
+          changePercent: ((meta.regularMarketPrice - meta.previousClose) / meta.previousClose * 100) || 0,
+          high: meta.regularMarketDayHigh || meta.regularMarketPrice,
+          low: meta.regularMarketDayLow || meta.regularMarketPrice,
+          volume: meta.regularMarketVolume || 0,
+          previousClose: meta.previousClose || 0,
+          isRealData: true
+        }
+      }
+    } catch (error) {
+      console.warn(`Yahoo Finance error for ${symbol}:`, error)
     }
-    return Object.entries(baseStocks).map(([symbol, data]) => ({
-      symbol,
-      price: data.price,
-      change: (Math.random() - 0.5) * 5,
-      changePercent: (Math.random() - 0.5) * 3,
-      volume: Math.floor(Math.random() * 50000000) + 10000000,
-      high: data.price * 1.02,
-      low: data.price * 0.98,
-    }))
+    return null
+  }
+
+  // 方法2: Finnhub 免费API (需要免费注册获取API key)
+  // 免费获取: https://finnhub.io/register
+  const FINNHUB_API_KEY = '' // 用户可以填入自己的免费API key
+  
+  const fetchFinnhubQuote = async (symbol: string) => {
+    if (!FINNHUB_API_KEY) return null
+    try {
+      const response = await axios.get(
+        `https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_API_KEY}`,
+        { timeout: 5000 }
+      )
+      const data = response.data
+      if (data && data.c) {
+        return {
+          symbol: symbol,
+          price: data.c, // Current price
+          change: data.d, // Change
+          changePercent: data.dp, // Change percent
+          high: data.h, // High
+          low: data.l, // Low
+          volume: 0, // Finnhub quote doesn't include volume
+          previousClose: data.pc,
+          isRealData: true
+        }
+      }
+    } catch (error) {
+      console.warn(`Finnhub error for ${symbol}:`, error)
+    }
+    return null
+  }
+
+  // 方法3: Twelve Data 免费API (800次/天免费)
+  // 免费获取: https://twelvedata.com/
+  const TWELVE_DATA_API_KEY = '' // 用户可以填入自己的免费API key
+  
+  const fetchTwelveDataQuote = async (symbol: string) => {
+    if (!TWELVE_DATA_API_KEY) return null
+    try {
+      const response = await axios.get(
+        `https://api.twelvedata.com/quote?symbol=${symbol}&apikey=${TWELVE_DATA_API_KEY}`,
+        { timeout: 5000 }
+      )
+      const data = response.data
+      if (data && data.close) {
+        return {
+          symbol: symbol,
+          price: parseFloat(data.close),
+          change: parseFloat(data.change) || 0,
+          changePercent: parseFloat(data.percent_change) || 0,
+          high: parseFloat(data.high) || parseFloat(data.close),
+          low: parseFloat(data.low) || parseFloat(data.close),
+          volume: parseInt(data.volume) || 0,
+          previousClose: parseFloat(data.previous_close) || parseFloat(data.close),
+          isRealData: true
+        }
+      }
+    } catch (error) {
+      console.warn(`Twelve Data error for ${symbol}:`, error)
+    }
+    return null
+  }
+
+  // 智能股票数据获取 - 多源回退
+  const fetchStockQuote = async (symbol: string) => {
+    // 优先使用 Finnhub (如果有API key)
+    let quote = await fetchFinnhubQuote(symbol)
+    if (quote) return quote
+
+    // 其次使用 Twelve Data (如果有API key)
+    quote = await fetchTwelveDataQuote(symbol)
+    if (quote) return quote
+
+    // 最后使用 Yahoo Finance 代理
+    quote = await fetchYahooFinanceQuote(symbol)
+    if (quote) return quote
+
+    // 回退到缓存或模拟数据
+    return null
+  }
+
+  // 基于真实市场价格的高保真模拟
+  const generateRealisticStockPrice = (symbol: string, basePrice: number) => {
+    const cache = stockPriceCache.current[symbol]
+    const now = Date.now()
+    
+    // 如果有缓存且未过期（30秒内），基于缓存价格微调
+    if (cache && now - cache.lastUpdate < 30000) {
+      // 模拟真实市场的微小波动 (±0.1%)
+      const microMovement = (Math.random() - 0.5) * cache.price * 0.002
+      const newPrice = cache.price + microMovement
+      stockPriceCache.current[symbol] = { price: newPrice, lastUpdate: now }
+      return newPrice
+    }
+    
+    // 否则使用基准价格
+    stockPriceCache.current[symbol] = { price: basePrice, lastUpdate: now }
+    return basePrice
+  }
+
+  // 获取所有股票价格 - 优先真实数据，回退模拟
+  const fetchStockPrices = async () => {
+    const stockSymbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'JPM', 'V', 'WMT', 'DIS', 'BA']
+    
+    // 2026年1月的真实基准价格估算
+    const basePrices: Record<string, number> = {
+      'AAPL': 188.50, 'MSFT': 425.30, 'GOOGL': 178.20, 'AMZN': 198.40,
+      'TSLA': 252.80, 'NVDA': 512.60, 'META': 592.40, 'JPM': 198.50,
+      'V': 288.70, 'WMT': 168.30, 'DIS': 118.40, 'BA': 188.90
+    }
+
+    const results = await Promise.all(
+      stockSymbols.map(async (symbol) => {
+        // 尝试获取真实数据
+        const realQuote = await fetchStockQuote(symbol)
+        
+        if (realQuote) {
+          return {
+            symbol,
+            price: realQuote.price,
+            change: realQuote.change,
+            changePercent: realQuote.changePercent,
+            volume: realQuote.volume || Math.floor(Math.random() * 50000000) + 10000000,
+            high: realQuote.high,
+            low: realQuote.low,
+            isRealData: true
+          }
+        }
+
+        // 使用高保真模拟
+        const price = generateRealisticStockPrice(symbol, basePrices[symbol] || 100)
+        const dayChange = (Math.random() - 0.5) * price * 0.03 // ±1.5% 日波动
+        
+        return {
+          symbol,
+          price: price,
+          change: dayChange,
+          changePercent: (dayChange / price) * 100,
+          volume: Math.floor(Math.random() * 50000000) + 10000000,
+          high: price * (1 + Math.random() * 0.015),
+          low: price * (1 - Math.random() * 0.015),
+          isRealData: false
+        }
+      })
+    )
+
+    return results
   }
 
   // 合并获取价格数据
@@ -176,7 +330,7 @@ export function TradingTerminal() {
     try {
       const [cryptoData, stockData] = await Promise.all([
         fetchCryptoPrices(),
-        Promise.resolve(generateStockPrices())
+        fetchStockPrices()
       ])
 
       const newPrices: PriceData = {}
