@@ -4,13 +4,11 @@ import path from 'path'
 
 export default defineConfig({
   plugins: [react()],
-  // 部署到 GitHub Pages 时设置 base 为仓库名，例如: '/repo-name/'
-  // For GitHub Pages deployment, set base to repo name, e.g.: '/repo-name/'
-  // 部署到 Cloudflare Pages 时保持 '/'
-  base: process.env.GITHUB_PAGES ? '/prediction-market/' : '/',
+  // GitHub Pages 部署必须设置 base 为仓库名
+  // For GitHub Pages: base must be set to repo name
+  base: '/prediction-market/',
   build: {
     outDir: 'dist',
-    // 生成 SPA 回退
     rollupOptions: {
       output: {
         manualChunks: {

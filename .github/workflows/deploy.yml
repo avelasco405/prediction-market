@@ -1,11 +1,11 @@
-# GitHub Pages / Cloudflare Pages 部署配置
-# Deploy to GitHub Pages or Cloudflare Pages
+# GitHub Pages 部署 - Vite React 项目
+# Deploy Vite React to GitHub Pages
 
 name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -14,8 +14,8 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -29,18 +29,15 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: './package-lock.json'
 
       - name: Install dependencies
         run: npm ci
 
       - name: Build
         run: npm run build
-        env:
-          VITE_API_URL: ''
 
       - name: Setup Pages
-        uses: actions/configure-pages@v4
+        uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
@@ -57,3 +54,4 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
