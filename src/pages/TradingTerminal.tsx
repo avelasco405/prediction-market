@@ -1,0 +1,894 @@
+import { useState, useEffect, useCallback, useRef } from 'react'
+import axios from 'axios'
+import { 
+  AlertTriangle, Activity, Bell,
+  Search, X, Plus, Minus, ArrowUpRight, ArrowDownRight
+} from 'lucide-react'
+import { CRYPTO_ASSETS, STOCK_ASSETS } from '@/config'
+import { formatCurrency, formatPercentage } from '@/lib/utils'
+import { useTheme } from '@/contexts/ThemeContext'
+import { useNotifications } from '@/contexts/NotificationContext'
+import { GlobalNavbar } from '@/components/GlobalNavbar'
+import { ProfessionalChart, ChartTypeSelector, getAssetIcon } from '@/components/ProfessionalChart'
+
+interface PriceData {
+  [key: string]: {
+    price: number
+    change: number
+    changePercent: number
+    volume: number
+    high24h: number
+    low24h: number
+    bid: number
+    ask: number
+    spread: number
+  }
+}
+
+interface Order {
+  id: string
+  symbol: string
+  side: 'BUY' | 'SELL'
+  type: 'LIMIT' | 'MARKET' | 'STOP' | 'IOC' | 'FOK'
+  price: number
+  qty: number
+  filled: number
+  status: 'NEW' | 'PARTIAL' | 'FILLED' | 'CANCELLED'
+  time: string
+}
+
+interface Position {
+  symbol: string
+  qty: number
+  avgPrice: number
+  currentPrice: number
+  pnl: number
+  pnlPercent: number
+  value: number
+}
+
+interface Trade {
+  id: string
+  symbol: string
+  side: 'BUY' | 'SELL'
+  price: number
+  qty: number
+  time: string
+}
+
+interface Alert {
+  id: string
+  symbol: string
+  type: 'PRICE_ABOVE' | 'PRICE_BELOW' | 'VOLUME_SPIKE'
+  value: number
+  active: boolean
+}
+
+export function TradingTerminal() {
+  useTheme()
+  const { addNotification } = useNotifications()
+  const [priceData, setPriceData] = useState<PriceData>({})
+  const [selectedSymbol, setSelectedSymbol] = useState('BTC')
+  const [orderSide, setOrderSide] = useState<'BUY' | 'SELL'>('BUY')
+  const [orderType, setOrderType] = useState<'LIMIT' | 'MARKET' | 'STOP' | 'IOC' | 'FOK'>('LIMIT')
+  const [orderPrice, setOrderPrice] = useState('')
+  const [orderQty, setOrderQty] = useState('')
+  const [orders, setOrders] = useState<Order[]>([])
+  const [positions, setPositions] = useState<Position[]>([])
+  const [trades, setTrades] = useState<Trade[]>([])
+  const [alerts, setAlerts] = useState<Alert[]>([])
+  const [totalPnL, setTotalPnL] = useState(0)
+  const [hotkeys, setHotkeys] = useState(true)
+
+  const [chartTimeframe, setChartTimeframe] = useState('1H')
+  const [chartType, setChartType] = useState<string>('candle')
+  const [leverage, setLeverage] = useState(1)
+  const [riskPercent] = useState(2)
+  const [activeTab, setActiveTab] = useState<'positions' | 'orders' | 'trades' | 'alerts'>('positions')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [accountBalance] = useState(1250000)
+  const [dailyPnL] = useState(3650)
+  const [weeklyPnL] = useState(28500)
+  const [winRate] = useState(68.5)
+  const [sharpeRatio] = useState(2.34)
+  const priceRef = useRef<number>(0)
+
+  // 生成订单簿
+  const generateOrderBook = useCallback((basePrice: number) => {
+    const bids = Array.from({ length: 20 }, (_, i) => ({
+      price: basePrice * (1 - (i + 1) * 0.00015),
+      qty: Math.random() * 80 + 10,
+      total: 0,
+      myOrder: i === 3 || i === 7
+    }))
+    const asks = Array.from({ length: 20 }, (_, i) => ({
+      price: basePrice * (1 + (i + 1) * 0.00015),
+      qty: Math.random() * 80 + 10,
+      total: 0,
+      myOrder: i === 2
+    }))
+    
+    let bidTotal = 0, askTotal = 0
+    bids.forEach(b => { bidTotal += b.qty; b.total = bidTotal })
+    asks.forEach(a => { askTotal += a.qty; a.total = askTotal })
+    
+    return { bids, asks }
+  }, [])
+
+  const [orderBook, setOrderBook] = useState(() => generateOrderBook(95000))
+
+  // 获取价格数据
+  const fetchPrices = async () => {
+    try {
+      const [cryptoRes, stockRes] = await Promise.all([
+        axios.get('http://localhost:8081/api/prices/crypto'),
+        axios.get('http://localhost:8081/api/prices/stocks')
+      ])
+
+      const newPrices: PriceData = {}
+
+      cryptoRes.data?.forEach((c: any) => {
+        const price = c.current_price ?? c.price ?? 0
+        const spread = price * 0.0001
+        const symbol = c.symbol?.toUpperCase() || c.id || 'UNKNOWN'
+        newPrices[symbol] = {
+          price: price,
+          change: c.price_change_24h ?? c.change ?? 0,
+          changePercent: c.price_change_percentage_24h ?? c.priceChangePerc ?? c.changePercent ?? 0,
+          volume: c.total_volume ?? c.volume24h ?? c.volume ?? 0,
+          high24h: c.high_24h ?? c.high ?? price,
+          low24h: c.low_24h ?? c.low ?? price,
+          bid: (c.bid ?? price - spread/2) || 0,
+          ask: (c.ask ?? price + spread/2) || 0,
+          spread: c.spread ?? spread ?? 0
+        }
+      })
+
+      stockRes.data?.forEach((s: any) => {
+        const price = s.price ?? 0
+        const spread = price * 0.0001
+        const symbol = s.symbol || 'UNKNOWN'
+        newPrices[symbol] = {
+          price: price,
+          change: s.change ?? 0,
+          changePercent: s.changePercent ?? 0,
+          volume: s.volume ?? 0,
+          high24h: s.high ?? price,
+          low24h: s.low ?? price,
+          bid: (s.bid ?? price - spread/2) || 0,
+          ask: (s.ask ?? price + spread/2) || 0,
+          spread: s.spread ?? spread ?? 0
+        }
+      })
+
+      setPriceData(newPrices)
+      
+      // 更新持仓的当前价格
+      setPositions(prev => prev.map(pos => {
+        const currentPrice = newPrices[pos.symbol]?.price || pos.currentPrice
+        const pnl = (currentPrice - pos.avgPrice) * pos.qty
+        const pnlPercent = ((currentPrice - pos.avgPrice) / pos.avgPrice) * 100
+        return { ...pos, currentPrice, pnl, pnlPercent, value: currentPrice * Math.abs(pos.qty) }
+      }))
+    } catch (error) {
+      console.error('Price fetch error:', error)
+    }
+  }
+
+  // 初始化
+  useEffect(() => {
+    setPositions([
+      { symbol: 'BTC', qty: 2.5, avgPrice: 94500, currentPrice: 95200, pnl: 1750, pnlPercent: 0.74, value: 238000 },
+      { symbol: 'ETH', qty: 15, avgPrice: 3450, currentPrice: 3520, pnl: 1050, pnlPercent: 2.03, value: 52800 },
+      { symbol: 'SOL', qty: 100, avgPrice: 175, currentPrice: 182, pnl: 700, pnlPercent: 4.0, value: 18200 },
+      { symbol: 'AAPL', qty: -50, avgPrice: 188, currentPrice: 185, pnl: 150, pnlPercent: 1.6, value: 9250 },
+      { symbol: 'NVDA', qty: 20, avgPrice: 495, currentPrice: 505, pnl: 200, pnlPercent: 2.02, value: 10100 },
+    ])
+    setTotalPnL(3850)
+
+    setOrders([
+      { id: 'ORD001', symbol: 'BTC', side: 'BUY', type: 'LIMIT', price: 94800, qty: 0.5, filled: 0, status: 'NEW', time: '10:32:15' },
+      { id: 'ORD002', symbol: 'ETH', side: 'SELL', type: 'LIMIT', price: 3580, qty: 5, filled: 2, status: 'PARTIAL', time: '10:31:42' },
+      { id: 'ORD003', symbol: 'SOL', side: 'BUY', type: 'STOP', price: 190, qty: 25, filled: 0, status: 'NEW', time: '10:28:03' },
+    ])
+
+    setTrades([
+      { id: 'T001', symbol: 'BTC', side: 'BUY', price: 95150, qty: 0.25, time: '10:45:32' },
+      { id: 'T002', symbol: 'ETH', side: 'SELL', price: 3515, qty: 3, time: '10:42:18' },
+      { id: 'T003', symbol: 'SOL', side: 'BUY', price: 181.5, qty: 50, time: '10:38:55' },
+      { id: 'T004', symbol: 'AAPL', side: 'SELL', price: 185.2, qty: 25, time: '10:35:12' },
+      { id: 'T005', symbol: 'NVDA', side: 'BUY', price: 504, qty: 10, time: '10:30:45' },
+    ])
+
+    setAlerts([
+      { id: 'A001', symbol: 'BTC', type: 'PRICE_ABOVE', value: 100000, active: true },
+      { id: 'A002', symbol: 'ETH', type: 'PRICE_BELOW', value: 3000, active: true },
+      { id: 'A003', symbol: 'SOL', type: 'VOLUME_SPIKE', value: 5000000000, active: false },
+    ])
+  }, [])
+
+  useEffect(() => {
+    fetchPrices()
+    const interval = setInterval(fetchPrices, 3000)
+    return () => clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    const currentPrice = priceData[selectedSymbol]?.price || 95000
+    if (Math.abs(currentPrice - priceRef.current) > 0.01) {
+      setOrderBook(generateOrderBook(currentPrice))
+      setOrderPrice((currentPrice ?? 0).toFixed(2))
+      priceRef.current = currentPrice
+    }
+  }, [selectedSymbol, priceData, generateOrderBook])
+
+  // 键盘快捷键
+  useEffect(() => {
+    if (!hotkeys) return
+    
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement) return
+      
+      switch(e.key.toUpperCase()) {
+        case 'B': setOrderSide('BUY'); break
+        case 'S': setOrderSide('SELL'); break
+        case 'M': setOrderType('MARKET'); break
+        case 'L': setOrderType('LIMIT'); break
+        case 'ENTER': handlePlaceOrder(); break
+        case 'ESCAPE': handleCancelAll(); break
+        case '1': setLeverage(1); break
+        case '2': setLeverage(2); break
+        case '5': setLeverage(5); break
+      }
+    }
+    
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [hotkeys, orderPrice, orderQty, orderSide, orderType, selectedSymbol])
+
+  // 生产级订单提交 / Production-grade order submission
+  const handlePlaceOrder = async () => {
+    if (!orderQty) {
+      addNotification('warning', 'Invalid Order / 无效订单', 'Please enter quantity / 请输入数量')
+      return
+    }
+    
+    const price = parseFloat(orderPrice) || priceData[selectedSymbol]?.price || 0
+    const qty = parseFloat(orderQty)
+    
+    if (qty <= 0) {
+      addNotification('warning', 'Invalid Quantity / 无效数量', 'Quantity must be positive / 数量必须大于0')
+      return
+    }
+    
+    if (orderType === 'LIMIT' && (!orderPrice || parseFloat(orderPrice) <= 0)) {
+      addNotification('warning', 'Invalid Price / 无效价格', 'Limit order requires price / 限价单需要价格')
+      return
+    }
+    
+    const orderValue = price * qty
+    const maxPositionSize = accountBalance * 0.5 // 最大50%仓位
+    
+    if (orderValue > maxPositionSize) {
+      addNotification('warning', 'Risk Limit / 风控限制', `Order exceeds 50% position limit / 订单超过50%仓位限制`)
+      return
+    }
+    
+    const newOrder: Order = {
+      id: `ORD${Date.now()}`,
+      symbol: selectedSymbol,
+      side: orderSide,
+      type: orderType,
+      price: price,
+      qty: qty,
+      filled: 0,
+      status: 'NEW',
+      time: new Date().toLocaleTimeString('en-US', { hour12: false })
+    }
+    
+    setOrders(prev => [newOrder, ...prev])
+    
+    // 尝试调用后端 API / Try calling backend API
+    try {
+      await axios.post('/v1/intents', {
+        user_id: 'user_001',
+        market_id: selectedSymbol,
+        side: orderSide.toLowerCase(),
+        order_type: orderType.toLowerCase(),
+        price: Math.round(price * 100),
+        amount: Math.round(qty * 100)
+      })
+    } catch (err) {
+      // 后端不可用时继续模拟 / Continue with simulation if backend unavailable
+      console.log('API not available, using local simulation')
+    }
+    
+    // 订单执行逻辑 / Order execution logic
+    if (orderType === 'MARKET' || orderType === 'IOC' || orderType === 'FOK') {
+      // 市价单/IOC/FOK 立即成交
+      setTimeout(() => {
+        const fillPrice = orderSide === 'BUY' 
+          ? price * (1 + Math.random() * 0.001) // 买单有轻微滑点
+          : price * (1 - Math.random() * 0.001) // 卖单有轻微滑点
+        
+        setOrders(prev => prev.map(o => o.id === newOrder.id ? { ...o, filled: o.qty, status: 'FILLED' as const, price: fillPrice } : o))
+        
+        const newTrade: Trade = {
+          id: `T${Date.now()}`,
+          symbol: selectedSymbol,
+          side: orderSide,
+          price: fillPrice,
+          qty: qty,
+          time: new Date().toLocaleTimeString('en-US', { hour12: false })
+        }
+        setTrades(prev => [newTrade, ...prev].slice(0, 100)) // 保留最近100条
+        
+        // 更新持仓 / Update positions
+        updatePosition(selectedSymbol, orderSide, qty, fillPrice)
+        
+        addNotification(
+          'trade',
+          'Order Filled / 订单成交',
+          `${orderSide} ${(qty ?? 0).toFixed(4)} ${selectedSymbol} @ ${formatCurrency(fillPrice)}`,
+          { symbol: selectedSymbol, side: orderSide, qty, price: fillPrice }
+        )
+      }, 150 + Math.random() * 350) // 模拟150-500ms延迟
+    } else if (orderType === 'LIMIT') {
+      // 限价单 - 检查是否可以立即成交
+      const currentPrice = priceData[selectedSymbol]?.price || 0
+      const canFillImmediately = orderSide === 'BUY' 
+        ? price >= currentPrice 
+        : price <= currentPrice
+      
+      if (canFillImmediately) {
+        setTimeout(() => {
+          setOrders(prev => prev.map(o => o.id === newOrder.id ? { ...o, filled: o.qty, status: 'FILLED' as const } : o))
+          setTrades(prev => [{
+            id: `T${Date.now()}`,
+            symbol: selectedSymbol,
+            side: orderSide,
+            price: price,
+            qty: qty,
+            time: new Date().toLocaleTimeString('en-US', { hour12: false })
+          }, ...prev].slice(0, 100))
+          
+          updatePosition(selectedSymbol, orderSide, qty, price)
+          
+          addNotification('trade', 'Limit Order Filled / 限价单成交', 
+            `${orderSide} ${(qty ?? 0).toFixed(4)} ${selectedSymbol} @ ${formatCurrency(price)}`)
+        }, 200)
+      } else {
+        addNotification('info', 'Order Placed / 订单已挂', 
+          `${orderType} ${orderSide} ${(qty ?? 0).toFixed(4)} ${selectedSymbol} @ ${formatCurrency(price)} - Waiting / 等待成交`)
+      }
+    } else if (orderType === 'STOP') {
+      addNotification('info', 'Stop Order Set / 止损单已设置', 
+        `Trigger @ ${formatCurrency(price)} / 触发价: ${formatCurrency(price)}`)
+    }
+    
+    setOrderQty('')
+    if (orderType !== 'LIMIT') setOrderPrice('')
+  }
+  
+  // 更新持仓 / Update position
+  const updatePosition = (symbol: string, side: 'BUY' | 'SELL', qty: number, price: number) => {
+    setPositions(prev => {
+      const existing = prev.find(p => p.symbol === symbol)
+      if (existing) {
+        const newQty = side === 'BUY' ? existing.qty + qty : existing.qty - qty
+        if (Math.abs(newQty) < 0.0001) {
+          // 平仓 / Close position
+          return prev.filter(p => p.symbol !== symbol)
+        }
+        const newAvgPrice = side === 'BUY' 
+          ? (existing.avgPrice * existing.qty + price * qty) / (existing.qty + qty)
+          : existing.avgPrice
+        return prev.map(p => p.symbol === symbol ? {
+          ...p,
+          qty: newQty,
+          avgPrice: newAvgPrice,
+          currentPrice: price,
+          pnl: (price - newAvgPrice) * newQty,
+          pnlPercent: ((price - newAvgPrice) / newAvgPrice) * 100,
+          value: Math.abs(newQty * price)
+        } : p)
+      } else if (side === 'BUY') {
+        // 新开仓 / New position
+        return [...prev, {
+          symbol,
+          qty,
+          avgPrice: price,
+          currentPrice: price,
+          pnl: 0,
+          pnlPercent: 0,
+          value: qty * price
+        }]
+      }
+      return prev
+    })
+  }
+
+  const handleCancelOrder = (orderId: string) => {
+    setOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: 'CANCELLED' as const } : o))
+    addNotification('info', 'Order Cancelled / 订单已取消', `Order ${orderId.slice(-6)} cancelled / 订单 ${orderId.slice(-6)} 已取消`)
+  }
+
+  const handleCancelAll = () => {
+    const activeOrders = orders.filter(o => o.status === 'NEW' || o.status === 'PARTIAL')
+    setOrders(prev => prev.map(o => 
+      o.status === 'NEW' || o.status === 'PARTIAL' 
+        ? { ...o, status: 'CANCELLED' as const } 
+        : o
+    ))
+    if (activeOrders.length > 0) {
+      addNotification('info', 'All Orders Cancelled / 全部订单已取消', `${activeOrders.length} orders cancelled / ${activeOrders.length} 个订单已取消`)
+    }
+  }
+
+  const handleClosePosition = (symbol: string) => {
+    const position = positions.find(p => p.symbol === symbol)
+    if (position) {
+      setPositions(prev => prev.filter(p => p.symbol !== symbol))
+      addNotification('trade', 'Position Closed / 持仓已平', 
+        `${symbol} ${position.qty > 0 ? 'LONG' : 'SHORT'} closed, P&L: ${formatCurrency(position.pnl)}`)
+    }
+  }
+
+  const calculatePositionSize = () => {
+    const currentPrice = priceData[selectedSymbol]?.price || 0
+    if (!currentPrice) return 0
+    const riskAmount = accountBalance * (riskPercent / 100)
+    return (riskAmount * leverage) / currentPrice
+  }
+
+  const currentData = priceData[selectedSymbol]
+  const allAssets = [...CRYPTO_ASSETS, ...STOCK_ASSETS]
+  const filteredAssets = searchQuery 
+    ? allAssets.filter(a => a.symbol.toLowerCase().includes(searchQuery.toLowerCase()) || a.name.toLowerCase().includes(searchQuery.toLowerCase()))
+    : allAssets
+
+  const totalPositionValue = positions.reduce((sum, p) => sum + p.value, 0)
+  const activeOrdersCount = orders.filter(o => o.status === 'NEW' || o.status === 'PARTIAL').length
+
+  return (
+    <div className="h-screen bg-[#0a0a0a] text-[#e0e0e0] font-mono text-xs flex flex-col overflow-hidden">
+      {/* 全局导航栏 / Global Navigation */}
+      <GlobalNavbar 
+        accountBalance={accountBalance}
+        dailyPnL={dailyPnL}
+        weeklyPnL={weeklyPnL}
+        winRate={winRate}
+        sharpeRatio={sharpeRatio}
+        showMetrics={true}
+        compact={true}
+      />
+
+      {/* 交易工具栏 / Trading Toolbar */}
+      <div className="h-8 bg-[#0d0d0d] border-b border-[#1a1a1a] flex items-center justify-between px-3">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-1">
+            <Activity className="h-3 w-3 text-[#00ff88] animate-pulse" />
+            <span className="text-[#00ff88]">LIVE / 实时</span>
+          </div>
+          <span className="text-[#888]">SELECTED / 已选: <span className="text-white font-bold">{selectedSymbol}</span></span>
+          <span className="text-[#888]">LEVERAGE / 杠杆: <span className="text-[#00aaff]">{leverage}x</span></span>
+        </div>
+        <div className="flex items-center gap-4">
+          <span className="text-[#888]">HOTKEYS / 快捷键: 
+            <button onClick={() => setHotkeys(!hotkeys)} className={`ml-1 ${hotkeys ? 'text-[#00ff88]' : 'text-[#ff4444]'}`}>
+              {hotkeys ? 'ON / 开' : 'OFF / 关'}
+            </button>
+          </span>
+          <span className="text-[#888]">POSITIONS / 持仓: <span className="text-white">{positions.length}</span></span>
+          <span className="text-[#888]">ORDERS / 订单: <span className="text-white">{activeOrdersCount}</span></span>
+        </div>
+      </div>
+
+      <div className="flex-1 flex overflow-hidden">
+        {/* 左侧市场列表 */}
+        <div className="w-52 border-r border-[#1a1a1a] flex flex-col bg-[#0d0d0d]">
+          <div className="h-8 border-b border-[#1a1a1a] flex items-center px-2 gap-2">
+            <Search className="h-3 w-3 text-[#666]" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search..."
+              className="flex-1 bg-transparent text-[#888] focus:outline-none text-xs"
+            />
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {filteredAssets.slice(0, 24).map((asset) => {
+              const data = priceData[asset.symbol]
+              const isSelected = selectedSymbol === asset.symbol
+              const hasPosition = positions.some(p => p.symbol === asset.symbol)
+              return (
+                <div
+                  key={asset.id}
+                  onClick={() => setSelectedSymbol(asset.symbol)}
+                  className={`flex items-center justify-between px-2 py-1.5 cursor-pointer border-b border-[#151515] hover:bg-[#151515] ${
+                    isSelected ? 'bg-[#0a1a0a] border-l-2 border-l-[#00ff88]' : ''
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {/* 专业资产图标 */}
+                    {getAssetIcon(asset.symbol)}
+                    <div className="flex flex-col">
+                      <span className={`font-semibold ${isSelected ? 'text-[#00ff88]' : 'text-[#ccc]'}`}>{asset.symbol}</span>
+                      {hasPosition && <span className="text-[8px] text-[#00aaff]">● POSITION</span>}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[#fff] text-[10px] font-mono">{data ? formatCurrency(data.price, 2) : '--'}</div>
+                    {data && (
+                      <div className={`text-[9px] font-mono ${(data.changePercent ?? 0) >= 0 ? 'text-[#00ff88]' : 'text-[#ff4444]'}`}>
+                        {(data.changePercent ?? 0) >= 0 ? '+' : ''}{formatPercentage(data.changePercent ?? 0)}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* 中间主区域 */}
+        <div className="flex-1 flex flex-col">
+          {/* 资产信息条 */}
+          <div className="h-14 bg-[#0d0d0d] border-b border-[#1a1a1a] flex items-center px-4 gap-6">
+            <div className="flex items-center gap-3">
+              {/* 大图标 */}
+              <div className="scale-150">{getAssetIcon(selectedSymbol)}</div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xl font-bold text-[#00ff88]">{selectedSymbol}</span>
+                  <span className="text-[#555]">/USD</span>
+                </div>
+                <span className="text-[9px] text-[#666]">{CRYPTO_ASSETS.find(a => a.symbol === selectedSymbol)?.name || STOCK_ASSETS.find(a => a.symbol === selectedSymbol)?.name || selectedSymbol}</span>
+              </div>
+            </div>
+            {currentData && (
+              <>
+                <div>
+                  <div className="text-[10px] text-[#666]">LAST</div>
+                  <div className="text-[#fff] text-lg font-bold">{formatCurrency(currentData.price)}</div>
+                </div>
+                <div className={currentData.changePercent >= 0 ? 'text-[#00ff88]' : 'text-[#ff4444]'}>
+                  <div className="text-[10px] text-[#666]">24H CHG</div>
+                  <div className="flex items-center gap-1 text-sm">
+                    {currentData.changePercent >= 0 ? <ArrowUpRight className="h-4 w-4" /> : <ArrowDownRight className="h-4 w-4" />}
+                    {formatPercentage(currentData.changePercent)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-[#666]">BID</div>
+                  <div className="text-[#00ff88]">{formatCurrency(currentData.bid)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-[#666]">ASK</div>
+                  <div className="text-[#ff4444]">{formatCurrency(currentData.ask)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-[#666]">SPREAD</div>
+                  <div className="text-[#ffaa00]">{(currentData.spread ?? 0).toFixed(4)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-[#666]">24H VOL</div>
+                  <div className="text-[#fff]">${((currentData.volume ?? 0) / 1e9).toFixed(2)}B</div>
+                </div>
+              </>
+            )}
+            {/* 图表类型选择器 */}
+            <div className="ml-auto flex items-center gap-3">
+              <ChartTypeSelector value={chartType} onChange={setChartType} />
+              <div className="flex items-center gap-1">
+                {['1M', '5M', '15M', '1H', '4H', '1D'].map((tf) => (
+                  <button
+                    key={tf}
+                    onClick={() => setChartTimeframe(tf)}
+                    className={`px-2 py-0.5 text-[10px] rounded ${chartTimeframe === tf ? 'bg-[#333] text-[#fff]' : 'text-[#666] hover:text-[#888]'}`}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* 专业图表区域 */}
+          <div className="h-56 bg-[#0a0a0a] border-b border-[#1a1a1a]">
+            <ProfessionalChart
+              symbol={selectedSymbol}
+              basePrice={currentData?.price || 95000}
+              chartType={chartType as any}
+              timeframe={chartTimeframe}
+              height={220}
+              showIndicators={true}
+            />
+          </div>
+
+          {/* 订单簿 + 交易面板 */}
+          <div className="flex-1 flex overflow-hidden">
+            {/* 订单簿 */}
+            <div className="w-64 border-r border-[#1a1a1a] flex flex-col bg-[#0d0d0d]">
+              <div className="h-6 bg-[#111] border-b border-[#1a1a1a] flex items-center justify-between px-2 text-[#666]">
+                <span>ORDER BOOK</span>
+                <span className="text-[9px]">DEPTH</span>
+              </div>
+              
+              {/* 卖单 */}
+              <div className="flex-1 overflow-hidden flex flex-col-reverse">
+                {orderBook.asks.slice(0, 12).reverse().map((ask, i) => (
+                  <div key={i} className="flex items-center px-2 py-0.5 hover:bg-[#151515] relative cursor-pointer" onClick={() => setOrderPrice((ask.price ?? 0).toFixed(2))}>
+                    <div className="absolute left-0 top-0 bottom-0 bg-[#ff444415]" style={{ width: `${Math.min((ask.total ?? 0) / 300 * 100, 100)}%` }} />
+                    <span className={`w-20 text-[10px] relative z-10 ${ask.myOrder ? 'text-[#ffaa00]' : 'text-[#ff4444]'}`}>{formatCurrency(ask.price ?? 0, 2)}</span>
+                    <span className="w-14 text-right text-[10px] text-[#888] relative z-10">{(ask.qty ?? 0).toFixed(3)}</span>
+                    <span className="w-14 text-right text-[9px] text-[#555] relative z-10">{(ask.total ?? 0).toFixed(1)}</span>
+                    {ask.myOrder && <span className="absolute right-1 text-[8px] text-[#ffaa00]">★</span>}
+                  </div>
+                ))}
+              </div>
+
+              {/* 中间价格 */}
+              <div className="h-8 bg-[#111] border-y border-[#222] flex items-center justify-center gap-2">
+                <span className="text-[#fff] font-bold text-sm">{currentData ? formatCurrency(currentData.price) : '--'}</span>
+                {currentData && (
+                  <span className={`text-[10px] ${currentData.changePercent >= 0 ? 'text-[#00ff88]' : 'text-[#ff4444]'}`}>
+                    {currentData.changePercent >= 0 ? '▲' : '▼'} {Math.abs(currentData.change || 0).toFixed(2)}
+                  </span>
+                )}
+              </div>
+
+              {/* 买单 */}
+              <div className="flex-1 overflow-hidden">
+                {orderBook.bids.slice(0, 12).map((bid, i) => (
+                  <div key={i} className="flex items-center px-2 py-0.5 hover:bg-[#151515] relative cursor-pointer" onClick={() => setOrderPrice((bid.price ?? 0).toFixed(2))}>
+                    <div className="absolute left-0 top-0 bottom-0 bg-[#00ff8815]" style={{ width: `${Math.min((bid.total ?? 0) / 300 * 100, 100)}%` }} />
+                    <span className={`w-20 text-[10px] relative z-10 ${bid.myOrder ? 'text-[#ffaa00]' : 'text-[#00ff88]'}`}>{formatCurrency(bid.price ?? 0, 2)}</span>
+                    <span className="w-14 text-right text-[10px] text-[#888] relative z-10">{(bid.qty ?? 0).toFixed(3)}</span>
+                    <span className="w-14 text-right text-[9px] text-[#555] relative z-10">{(bid.total ?? 0).toFixed(1)}</span>
+                    {bid.myOrder && <span className="absolute right-1 text-[8px] text-[#ffaa00]">★</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 交易面板 */}
+            <div className="w-64 border-r border-[#1a1a1a] flex flex-col bg-[#0d0d0d]">
+              <div className="h-6 bg-[#111] border-b border-[#1a1a1a] flex items-center px-2 text-[#666]">ORDER ENTRY</div>
+              
+              <div className="p-2 space-y-2 flex-1">
+                {/* 买卖切换 */}
+                <div className="grid grid-cols-2 gap-1">
+                  <button onClick={() => setOrderSide('BUY')} className={`py-1.5 font-bold text-xs ${orderSide === 'BUY' ? 'bg-[#00ff88] text-[#000]' : 'bg-[#1a1a1a] text-[#666] hover:bg-[#222]'}`}>BUY [B]</button>
+                  <button onClick={() => setOrderSide('SELL')} className={`py-1.5 font-bold text-xs ${orderSide === 'SELL' ? 'bg-[#ff4444] text-[#fff]' : 'bg-[#1a1a1a] text-[#666] hover:bg-[#222]'}`}>SELL [S]</button>
+                </div>
+
+                {/* 订单类型 */}
+                <div className="grid grid-cols-5 gap-0.5">
+                  {(['LIMIT', 'MARKET', 'STOP', 'IOC', 'FOK'] as const).map((type) => (
+                    <button key={type} onClick={() => setOrderType(type)} className={`py-0.5 text-[9px] ${orderType === type ? 'bg-[#333] text-[#fff]' : 'bg-[#1a1a1a] text-[#555] hover:bg-[#222]'}`}>{type}</button>
+                  ))}
+                </div>
+
+                {/* 杠杆 */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[#555] text-[9px]">LEVERAGE</span>
+                    <span className="text-[#00aaff] text-[9px]">{leverage}x</span>
+                  </div>
+                  <div className="flex gap-1">
+                    {[1, 2, 3, 5, 10, 20].map((lev) => (
+                      <button key={lev} onClick={() => setLeverage(lev)} className={`flex-1 py-0.5 text-[9px] ${leverage === lev ? 'bg-[#00aaff] text-[#000]' : 'bg-[#1a1a1a] text-[#666] hover:bg-[#222]'}`}>{lev}x</button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 价格 */}
+                <div>
+                  <label className="text-[#555] text-[9px]">PRICE</label>
+                  <div className="flex">
+                    <button onClick={() => setOrderPrice((p) => ((parseFloat(p) || 0) - 1).toFixed(2))} className="px-2 bg-[#1a1a1a] text-[#888] hover:bg-[#222]"><Minus className="h-3 w-3" /></button>
+                    <input type="text" value={orderPrice} onChange={(e) => setOrderPrice(e.target.value)} className="flex-1 bg-[#111] border-y border-[#222] px-2 py-1 text-[#fff] text-center text-xs focus:outline-none" disabled={orderType === 'MARKET'} />
+                    <button onClick={() => setOrderPrice((p) => ((parseFloat(p) || 0) + 1).toFixed(2))} className="px-2 bg-[#1a1a1a] text-[#888] hover:bg-[#222]"><Plus className="h-3 w-3" /></button>
+                  </div>
+                </div>
+
+                {/* 数量 */}
+                <div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#555] text-[9px]">QUANTITY</span>
+                    <button onClick={() => setOrderQty((calculatePositionSize() || 0).toFixed(4))} className="text-[8px] text-[#00aaff] hover:underline">RISK {riskPercent}%</button>
+                  </div>
+                  <input type="text" value={orderQty} onChange={(e) => setOrderQty(e.target.value)} className="w-full bg-[#111] border border-[#222] px-2 py-1 text-[#fff] text-xs focus:outline-none focus:border-[#00ff88]" placeholder="0.00" />
+                </div>
+
+                {/* 快速数量 */}
+                <div className="grid grid-cols-4 gap-0.5">
+                  {['0.01', '0.1', '0.5', '1'].map((qty) => (
+                    <button key={qty} onClick={() => setOrderQty(qty)} className="py-0.5 text-[9px] bg-[#1a1a1a] text-[#666] hover:bg-[#222]">{qty}</button>
+                  ))}
+                </div>
+
+                {/* 订单预览 */}
+                <div className="bg-[#111] p-2 border border-[#1a1a1a] space-y-1">
+                  <div className="flex justify-between text-[9px]">
+                    <span className="text-[#555]">NOTIONAL</span>
+                    <span className="text-[#fff]">{formatCurrency((parseFloat(orderPrice) || 0) * (parseFloat(orderQty) || 0))}</span>
+                  </div>
+                  <div className="flex justify-between text-[9px]">
+                    <span className="text-[#555]">MARGIN REQ</span>
+                    <span className="text-[#888]">{formatCurrency((parseFloat(orderPrice) || 0) * (parseFloat(orderQty) || 0) / leverage)}</span>
+                  </div>
+                  <div className="flex justify-between text-[9px]">
+                    <span className="text-[#555]">FEE (0.02%)</span>
+                    <span className="text-[#666]">{formatCurrency((parseFloat(orderPrice) || 0) * (parseFloat(orderQty) || 0) * 0.0002)}</span>
+                  </div>
+                </div>
+
+                {/* 下单按钮 */}
+                <button onClick={handlePlaceOrder} disabled={!orderQty} className={`w-full py-2.5 font-bold text-sm ${orderSide === 'BUY' ? 'bg-[#00ff88] text-[#000] hover:bg-[#00dd77]' : 'bg-[#ff4444] text-[#fff] hover:bg-[#dd3333]'} disabled:opacity-50 disabled:cursor-not-allowed`}>
+                  {orderType === 'MARKET' ? 'MARKET ' : ''}{orderSide} {selectedSymbol}
+                </button>
+
+                <button onClick={handleCancelAll} className="w-full py-1.5 text-[10px] bg-[#1a1a1a] text-[#ff4444] border border-[#ff444430] hover:bg-[#201515]">CANCEL ALL [{activeOrdersCount}]</button>
+              </div>
+            </div>
+
+            {/* 右侧面板 */}
+            <div className="flex-1 flex flex-col bg-[#0d0d0d]">
+              {/* 标签页 */}
+              <div className="h-6 bg-[#111] border-b border-[#1a1a1a] flex items-center px-2 gap-4 text-[10px]">
+                {[
+                  { key: 'positions', label: 'POSITIONS', count: positions.length },
+                  { key: 'orders', label: 'ORDERS', count: activeOrdersCount },
+                  { key: 'trades', label: 'TRADES', count: trades.length },
+                  { key: 'alerts', label: 'ALERTS', count: alerts.filter(a => a.active).length }
+                ].map(tab => (
+                  <button key={tab.key} onClick={() => setActiveTab(tab.key as any)} className={`flex items-center gap-1 ${activeTab === tab.key ? 'text-[#fff]' : 'text-[#666] hover:text-[#888]'}`}>
+                    {tab.label}
+                    {tab.count > 0 && <span className={`px-1 rounded text-[8px] ${activeTab === tab.key ? 'bg-[#00ff88] text-[#000]' : 'bg-[#333]'}`}>{tab.count}</span>}
+                  </button>
+                ))}
+                <div className="ml-auto text-[#888]">VALUE: <span className="text-[#fff]">{formatCurrency(totalPositionValue)}</span></div>
+              </div>
+
+              {/* 内容区域 */}
+              <div className="flex-1 overflow-auto">
+                {activeTab === 'positions' && (
+                  <table className="w-full">
+                    <thead className="bg-[#111] sticky top-0">
+                      <tr className="text-[#555] text-left text-[9px]">
+                        <th className="px-2 py-1">SYMBOL</th>
+                        <th className="px-2 py-1 text-right">SIZE</th>
+                        <th className="px-2 py-1 text-right">ENTRY</th>
+                        <th className="px-2 py-1 text-right">MARK</th>
+                        <th className="px-2 py-1 text-right">VALUE</th>
+                        <th className="px-2 py-1 text-right">P&L</th>
+                        <th className="px-2 py-1"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {positions.map((pos) => (
+                        <tr key={pos.symbol} className="border-b border-[#151515] hover:bg-[#111] text-[10px]">
+                          <td className="px-2 py-1.5 text-[#fff] font-bold">{pos.symbol}</td>
+                          <td className={`px-2 py-1.5 text-right ${pos.qty >= 0 ? 'text-[#00ff88]' : 'text-[#ff4444]'}`}>{pos.qty >= 0 ? '+' : ''}{pos.qty}</td>
+                          <td className="px-2 py-1.5 text-right text-[#888]">{formatCurrency(pos.avgPrice)}</td>
+                          <td className="px-2 py-1.5 text-right text-[#fff]">{formatCurrency(pos.currentPrice)}</td>
+                          <td className="px-2 py-1.5 text-right text-[#888]">{formatCurrency(pos.value)}</td>
+                          <td className={`px-2 py-1.5 text-right ${(pos.pnl ?? 0) >= 0 ? 'text-[#00ff88]' : 'text-[#ff4444]'}`}>{(pos.pnl ?? 0) >= 0 ? '+' : ''}{formatCurrency(pos.pnl ?? 0)} ({(pos.pnlPercent ?? 0).toFixed(2)}%)</td>
+                          <td className="px-2 py-1.5"><button onClick={() => handleClosePosition(pos.symbol)} className="text-[#ff4444] hover:text-[#ff6666]"><X className="h-3 w-3" /></button></td>
+                        </tr>
+                      ))}
+                      {positions.length > 0 && (
+                        <tr className="bg-[#111] font-bold text-[10px]">
+                          <td className="px-2 py-1.5 text-[#fff]" colSpan={4}>TOTAL</td>
+                          <td className="px-2 py-1.5 text-right text-[#fff]">{formatCurrency(totalPositionValue)}</td>
+                          <td className={`px-2 py-1.5 text-right ${totalPnL >= 0 ? 'text-[#00ff88]' : 'text-[#ff4444]'}`}>{totalPnL >= 0 ? '+' : ''}{formatCurrency(totalPnL)}</td>
+                          <td></td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                )}
+
+                {activeTab === 'orders' && (
+                  <table className="w-full">
+                    <thead className="bg-[#111] sticky top-0">
+                      <tr className="text-[#555] text-left text-[9px]">
+                        <th className="px-2 py-1">TIME</th>
+                        <th className="px-2 py-1">SYMBOL</th>
+                        <th className="px-2 py-1">SIDE</th>
+                        <th className="px-2 py-1">TYPE</th>
+                        <th className="px-2 py-1 text-right">PRICE</th>
+                        <th className="px-2 py-1 text-right">QTY</th>
+                        <th className="px-2 py-1">STATUS</th>
+                        <th className="px-2 py-1"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orders.map((order) => (
+                        <tr key={order.id} className="border-b border-[#151515] hover:bg-[#111] text-[10px]">
+                          <td className="px-2 py-1.5 text-[#555]">{order.time}</td>
+                          <td className="px-2 py-1.5 text-[#fff]">{order.symbol}</td>
+                          <td className={`px-2 py-1.5 ${order.side === 'BUY' ? 'text-[#00ff88]' : 'text-[#ff4444]'}`}>{order.side}</td>
+                          <td className="px-2 py-1.5 text-[#666]">{order.type}</td>
+                          <td className="px-2 py-1.5 text-right text-[#fff]">{formatCurrency(order.price)}</td>
+                          <td className="px-2 py-1.5 text-right text-[#888]">{order.filled}/{order.qty}</td>
+                          <td className="px-2 py-1.5">
+                            <span className={`px-1 py-0.5 text-[8px] ${order.status === 'FILLED' ? 'bg-[#00ff8830] text-[#00ff88]' : order.status === 'PARTIAL' ? 'bg-[#ffaa0030] text-[#ffaa00]' : order.status === 'CANCELLED' ? 'bg-[#ff444430] text-[#ff4444]' : 'bg-[#33333330] text-[#888]'}`}>{order.status}</span>
+                          </td>
+                          <td className="px-2 py-1.5">{(order.status === 'NEW' || order.status === 'PARTIAL') && <button onClick={() => handleCancelOrder(order.id)} className="text-[#ff4444] hover:text-[#ff6666]"><X className="h-3 w-3" /></button>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                {activeTab === 'trades' && (
+                  <table className="w-full">
+                    <thead className="bg-[#111] sticky top-0">
+                      <tr className="text-[#555] text-left text-[9px]">
+                        <th className="px-2 py-1">TIME</th>
+                        <th className="px-2 py-1">SYMBOL</th>
+                        <th className="px-2 py-1">SIDE</th>
+                        <th className="px-2 py-1 text-right">PRICE</th>
+                        <th className="px-2 py-1 text-right">QTY</th>
+                        <th className="px-2 py-1 text-right">VALUE</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trades.map((trade) => (
+                        <tr key={trade.id} className="border-b border-[#151515] hover:bg-[#111] text-[10px]">
+                          <td className="px-2 py-1.5 text-[#555]">{trade.time}</td>
+                          <td className="px-2 py-1.5 text-[#fff]">{trade.symbol}</td>
+                          <td className={`px-2 py-1.5 ${trade.side === 'BUY' ? 'text-[#00ff88]' : 'text-[#ff4444]'}`}>{trade.side}</td>
+                          <td className="px-2 py-1.5 text-right text-[#fff]">{formatCurrency(trade.price)}</td>
+                          <td className="px-2 py-1.5 text-right text-[#888]">{trade.qty}</td>
+                          <td className="px-2 py-1.5 text-right text-[#888]">{formatCurrency(trade.price * trade.qty)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                {activeTab === 'alerts' && (
+                  <div className="p-2 space-y-2">
+                    {alerts.map((alert) => (
+                      <div key={alert.id} className={`flex items-center justify-between p-2 border ${alert.active ? 'border-[#00ff8830] bg-[#00ff8810]' : 'border-[#222] bg-[#111]'}`}>
+                        <div className="flex items-center gap-2">
+                          <Bell className={`h-3 w-3 ${alert.active ? 'text-[#00ff88]' : 'text-[#555]'}`} />
+                          <span className="text-[#fff]">{alert.symbol}</span>
+                          <span className="text-[#888] text-[10px]">{alert.type === 'PRICE_ABOVE' ? '>' : alert.type === 'PRICE_BELOW' ? '<' : 'VOL'} {formatCurrency(alert.value)}</span>
+                        </div>
+                        <button className="text-[#ff4444] hover:text-[#ff6666]"><X className="h-3 w-3" /></button>
+                      </div>
+                    ))}
+                    <button className="w-full py-2 border border-dashed border-[#333] text-[#555] hover:border-[#555] hover:text-[#888] text-[10px] flex items-center justify-center gap-1"><Plus className="h-3 w-3" /> ADD ALERT</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 底部快捷键提示 */}
+      <div className="h-6 bg-[#0f0f0f] border-t border-[#1a1a1a] flex items-center justify-between px-4 text-[9px]">
+        <div className="flex items-center gap-6 text-[#555]">
+          <span><span className="text-[#888]">[B]</span> Buy</span>
+          <span><span className="text-[#888]">[S]</span> Sell</span>
+          <span><span className="text-[#888]">[L]</span> Limit</span>
+          <span><span className="text-[#888]">[M]</span> Market</span>
+          <span><span className="text-[#888]">[ENTER]</span> Place</span>
+          <span><span className="text-[#888]">[ESC]</span> Cancel</span>
+          <span><span className="text-[#888]">[1/2/5]</span> Leverage</span>
+        </div>
+        <div className="flex items-center gap-4">
+          <span className="text-[#ffaa00] flex items-center gap-1"><AlertTriangle className="h-3 w-3" /> RISK: {riskPercent}%</span>
+          <span className="text-[#888]">MARGIN: <span className="text-[#fff]">{(((totalPositionValue ?? 0) / (accountBalance || 1)) * 100).toFixed(1)}%</span></span>
+        </div>
+      </div>
+    </div>
+  )
+}
