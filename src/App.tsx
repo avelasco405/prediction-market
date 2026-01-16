@@ -1,8 +1,10 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import { TradingTerminal } from '@/pages/TradingTerminal'
 import { PredictionMarket } from '@/pages/PredictionMarket'
 import { AdminDashboard } from '@/pages/AdminDashboard'
 
+// 使用 HashRouter 解决 GitHub Pages SPA 刷新404问题
+// HashRouter uses # in URL, which works with static hosting
 function App() {
   return (
     <Router>

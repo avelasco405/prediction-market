@@ -92,6 +92,7 @@ export function TradingTerminal() {
   const [winRate] = useState(68.5)
   const [sharpeRatio] = useState(2.34)
   const priceRef = useRef<number>(0)
+  const symbolRef = useRef<string>('')
 
   // 生成订单簿
   const generateOrderBook = useCallback((basePrice: number) => {
@@ -457,10 +458,16 @@ export function TradingTerminal() {
 
   useEffect(() => {
     const currentPrice = priceData[selectedSymbol]?.price || 95000
-    if (Math.abs(currentPrice - priceRef.current) > 0.01) {
+    // 当资产切换或价格变化超过阈值时更新订单簿
+    const symbolChanged = symbolRef.current !== selectedSymbol
+    const priceThreshold = currentPrice * 0.0001 // 0.01% 阈值
+    const priceChanged = Math.abs(currentPrice - priceRef.current) > priceThreshold
+    
+    if (symbolChanged || priceChanged) {
       setOrderBook(generateOrderBook(currentPrice))
       setOrderPrice((currentPrice ?? 0).toFixed(2))
       priceRef.current = currentPrice
+      symbolRef.current = selectedSymbol
     }
   }, [selectedSymbol, priceData, generateOrderBook])
 
@@ -840,6 +847,7 @@ export function TradingTerminal() {
           {/* 专业图表区域 */}
           <div className="h-56 bg-[#0a0a0a] border-b border-[#1a1a1a]">
             <ProfessionalChart
+              key={`${selectedSymbol}-${currentData?.price?.toFixed(0) || 0}`}
               symbol={selectedSymbol}
               basePrice={currentData?.price || 95000}
               chartType={chartType as any}
