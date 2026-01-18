@@ -8,8 +8,21 @@ import { CRYPTO_ASSETS, STOCK_ASSETS } from '@/config'
 import { formatCurrency, formatPercentage } from '@/lib/utils'
 import { useTheme } from '@/contexts/ThemeContext'
 import { useNotifications } from '@/contexts/NotificationContext'
+import { useAccount } from '@/contexts/AccountContext'
+import { useMarketStatus } from '@/contexts/MarketStatusContext'
 import { GlobalNavbar } from '@/components/GlobalNavbar'
 import { ProfessionalChart, ChartTypeSelector, getAssetIcon } from '@/components/ProfessionalChart'
+import { AccountBreakdown } from '@/components/AccountBreakdown'
+import { RiskMeter } from '@/components/RiskMeter'
+import { MarketStatusBar } from '@/components/MarketStatusBar'
+import { EventTags } from '@/components/EventTags'
+import { 
+  generateMarketEvents, 
+  calculateExecutionFee,
+  simulateOrderExecution,
+  generateRealisticOrderBook,
+  type MarketEvent
+} from '@/lib/tradingLogic'
 
 interface PriceData {
   [key: string]: {
@@ -67,6 +80,8 @@ interface Alert {
 export function TradingTerminal() {
   useTheme()
   const { addNotification } = useNotifications()
+  const account = useAccount()
+  const { getMarketStatus } = useMarketStatus()
   const [priceData, setPriceData] = useState<PriceData>({})
   const [selectedSymbol, setSelectedSymbol] = useState('BTC')
   const [orderSide, setOrderSide] = useState<'BUY' | 'SELL'>('BUY')
@@ -79,12 +94,13 @@ export function TradingTerminal() {
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [totalPnL, setTotalPnL] = useState(0)
   const [hotkeys, setHotkeys] = useState(true)
+  const [marketEvents, setMarketEvents] = useState<MarketEvent[]>([])
 
   const [chartTimeframe, setChartTimeframe] = useState('1H')
   const [chartType, setChartType] = useState<string>('candle')
   const [leverage, setLeverage] = useState(1)
   const [riskPercent] = useState(2)
-  const [activeTab, setActiveTab] = useState<'positions' | 'orders' | 'trades' | 'alerts'>('positions')
+  const [activeTab, setActiveTab] = useState<'positions' | 'orders' | 'trades' | 'alerts' | 'account' | 'risk'>('positions')
   const [searchQuery, setSearchQuery] = useState('')
   const [accountBalance] = useState(1250000)
   const [dailyPnL] = useState(3650)
@@ -94,17 +110,21 @@ export function TradingTerminal() {
   const priceRef = useRef<number>(0)
   const symbolRef = useRef<string>('')
 
-  // 生成订单簿
+  // 生成订单簿 - 使用真实数据
   const generateOrderBook = useCallback((basePrice: number) => {
-    const bids = Array.from({ length: 20 }, (_, i) => ({
-      price: basePrice * (1 - (i + 1) * 0.00015),
-      qty: Math.random() * 80 + 10,
+    const volatility = (Math.random() * 0.02 + 0.005); // 0.5% - 2.5%
+    const realisticBook = generateRealisticOrderBook(basePrice, volatility)
+    
+    // Convert to old format for compatibility
+    const bids = realisticBook.bids.map((level, i) => ({
+      price: level.price,
+      qty: level.size,
       total: 0,
       myOrder: i === 3 || i === 7
     }))
-    const asks = Array.from({ length: 20 }, (_, i) => ({
-      price: basePrice * (1 + (i + 1) * 0.00015),
-      qty: Math.random() * 80 + 10,
+    const asks = realisticBook.asks.map((level, i) => ({
+      price: level.price,
+      qty: level.size,
       total: 0,
       myOrder: i === 2
     }))
@@ -112,6 +132,16 @@ export function TradingTerminal() {
     let bidTotal = 0, askTotal = 0
     bids.forEach(b => { bidTotal += b.qty; b.total = bidTotal })
     asks.forEach(a => { askTotal += a.qty; a.total = askTotal })
+    
+    // Store market events
+    if (realisticBook.events.length > 0) {
+      setMarketEvents(prev => [...realisticBook.events.map((event, i) => ({
+        id: `event-${Date.now()}-${i}`,
+        label: event,
+        severity: 'info' as const,
+        timestamp: Date.now()
+      })), ...prev].slice(0, 10))
+    }
     
     return { bids, asks }
   }, [])
@@ -405,6 +435,27 @@ export function TradingTerminal() {
 
       setPriceData(newPrices)
       
+      // Generate market events for current symbol - NEW
+      if (newPrices[selectedSymbol]) {
+        const currentData = newPrices[selectedSymbol]
+        const prevData = priceData[selectedSymbol]
+        const previousPrice = prevData?.price || currentData.price
+        
+        const events = generateMarketEvents(
+          selectedSymbol,
+          currentData.price,
+          previousPrice,
+          currentData.bid,
+          currentData.ask,
+          currentData.volume,
+          Math.random() * 0.0002 - 0.0001 // Random funding rate for demo
+        )
+        
+        if (events.length > 0) {
+          setMarketEvents(prev => [...events, ...prev].slice(0, 10))
+        }
+      }
+      
       // 更新持仓的当前价格
       setPositions(prev => prev.map(pos => {
         const currentPrice = newPrices[pos.symbol]?.price || pos.currentPrice
@@ -514,12 +565,41 @@ export function TradingTerminal() {
       addNotification('warning', 'Invalid Price / 无效价格', 'Limit order requires price / 限价单需要价格')
       return
     }
-    
+
+    // Check market status - NEW
+    const marketStatus = getMarketStatus(selectedSymbol)
+    if (!marketStatus.canPlaceOrder) {
+      addNotification('warning', 'Market Closed / 市场关闭', 
+        `${selectedSymbol} market is ${marketStatus.status}. ${marketStatus.reason || 'Orders not allowed'}`)
+      return
+    }
+
+    // Determine account type
+    const isCrypto = CRYPTO_ASSETS.some(a => a.symbol === selectedSymbol)
+    const accountType = isCrypto ? 'crypto' : 'equity'
+    const selectedAccount = accountType === 'crypto' ? account.cryptoAccount : account.equityAccount
+
     const orderValue = price * qty
-    const maxPositionSize = accountBalance * 0.5 // 最大50%仓位
+    const maxLeverage = accountType === 'crypto' ? 20 : 5
     
-    if (orderValue > maxPositionSize) {
-      addNotification('warning', 'Risk Limit / 风控限制', `Order exceeds 50% position limit / 订单超过50%仓位限制`)
+    // Validate leverage limit
+    if (leverage > maxLeverage) {
+      addNotification('warning', 'Leverage Limit / 杠杆限制', 
+        `${accountType === 'crypto' ? 'Crypto' : 'Equity'} max leverage is ${maxLeverage}x`)
+      return
+    }
+    
+    // Validate margin usage - NEW
+    const marginValidation = account.validateMarginUsage(selectedSymbol, leverage, accountType)
+    if (!marginValidation.isValid) {
+      addNotification('warning', 'Margin Validation Failed / 保证金验证失败', marginValidation.reason || '')
+      return
+    }
+
+    const marginRequired = orderValue / leverage
+    if (selectedAccount.cash < marginRequired) {
+      addNotification('warning', 'Insufficient Margin / 保证金不足', 
+        `Required: ${formatCurrency(marginRequired)}, Available: ${formatCurrency(selectedAccount.cash)}`)
       return
     }
     
@@ -536,121 +616,130 @@ export function TradingTerminal() {
     }
     
     setOrders(prev => [newOrder, ...prev])
+    addNotification('info', 'Order Placed / 订单已提交', `Executing with simulated delays and realistic fills...`)
+
+    // Simulate order execution with delays, failures, and partial fills - NEW
+    const executionDelay = Math.random() * 400 + 100 // 100-500ms
     
-    // 尝试调用后端 API / Try calling backend API
-    try {
-      await axios.post('/v1/intents', {
-        user_id: 'user_001',
-        market_id: selectedSymbol,
-        side: orderSide.toLowerCase(),
-        order_type: orderType.toLowerCase(),
-        price: Math.round(price * 100),
-        amount: Math.round(qty * 100)
-      })
-    } catch (err) {
-      // 后端不可用时继续模拟 / Continue with simulation if backend unavailable
-      console.log('API not available, using local simulation')
-    }
-    
-    // 订单执行逻辑 / Order execution logic
-    if (orderType === 'MARKET' || orderType === 'IOC' || orderType === 'FOK') {
-      // 市价单/IOC/FOK 立即成交
-      setTimeout(() => {
-        const fillPrice = orderSide === 'BUY' 
-          ? price * (1 + Math.random() * 0.001) // 买单有轻微滑点
-          : price * (1 - Math.random() * 0.001) // 卖单有轻微滑点
-        
-        setOrders(prev => prev.map(o => o.id === newOrder.id ? { ...o, filled: o.qty, status: 'FILLED' as const, price: fillPrice } : o))
-        
-        const newTrade: Trade = {
-          id: `T${Date.now()}`,
-          symbol: selectedSymbol,
-          side: orderSide,
-          price: fillPrice,
-          qty: qty,
-          time: new Date().toLocaleTimeString('en-US', { hour12: false })
-        }
-        setTrades(prev => [newTrade, ...prev].slice(0, 100)) // 保留最近100条
-        
-        // 更新持仓 / Update positions
-        updatePosition(selectedSymbol, orderSide, qty, fillPrice)
-        
-        addNotification(
-          'trade',
-          'Order Filled / 订单成交',
-          `${orderSide} ${(qty ?? 0).toFixed(4)} ${selectedSymbol} @ ${formatCurrency(fillPrice)}`,
-          { symbol: selectedSymbol, side: orderSide, qty, price: fillPrice }
-        )
-      }, 150 + Math.random() * 350) // 模拟150-500ms延迟
-    } else if (orderType === 'LIMIT') {
-      // 限价单 - 检查是否可以立即成交
-      const currentPrice = priceData[selectedSymbol]?.price || 0
-      const canFillImmediately = orderSide === 'BUY' 
-        ? price >= currentPrice 
-        : price <= currentPrice
+    setTimeout(async () => {
+      const currentBid = priceData[selectedSymbol]?.bid || price
+      const currentAsk = priceData[selectedSymbol]?.ask || price
       
-      if (canFillImmediately) {
-        setTimeout(() => {
-          setOrders(prev => prev.map(o => o.id === newOrder.id ? { ...o, filled: o.qty, status: 'FILLED' as const } : o))
-          setTrades(prev => [{
-            id: `T${Date.now()}`,
-            symbol: selectedSymbol,
-            side: orderSide,
-            price: price,
-            qty: qty,
-            time: new Date().toLocaleTimeString('en-US', { hour12: false })
-          }, ...prev].slice(0, 100))
-          
-          updatePosition(selectedSymbol, orderSide, qty, price)
-          
-          addNotification('trade', 'Limit Order Filled / 限价单成交', 
-            `${orderSide} ${(qty ?? 0).toFixed(4)} ${selectedSymbol} @ ${formatCurrency(price)}`)
-        }, 200)
-      } else {
-        addNotification('info', 'Order Placed / 订单已挂', 
-          `${orderType} ${orderSide} ${(qty ?? 0).toFixed(4)} ${selectedSymbol} @ ${formatCurrency(price)} - Waiting / 等待成交`)
+      // Simulate execution with possible failures and partial fills
+      const execution = simulateOrderExecution(
+        qty,
+        price,
+        currentBid,
+        currentAsk,
+        orderType,
+        orderSide,
+        0.85 // 85% liquidity default
+      )
+
+      if (!execution.success) {
+        // Order failed
+        setOrders(prev => prev.map(o => 
+          o.id === newOrder.id ? { ...o, status: 'CANCELLED' as const } : o
+        ))
+        addNotification('error', 'Order Failed / 订单失败', execution.failureReason || 'Unknown error')
+        return
       }
-    } else if (orderType === 'STOP') {
-      addNotification('info', 'Stop Order Set / 止损单已设置', 
-        `Trigger @ ${formatCurrency(price)} / 触发价: ${formatCurrency(price)}`)
-    }
+
+      // Calculate fees
+      const executionFee = calculateExecutionFee(execution.executedQty, execution.executedPrice, 0.001)
+      account.updateFees(executionFee, accountType)
+
+      // Update order status
+      const isFilled = execution.executedQty === qty
+      setOrders(prev => prev.map(o => 
+        o.id === newOrder.id 
+          ? { 
+              ...o, 
+              filled: execution.executedQty, 
+              status: isFilled ? 'FILLED' as const : 'PARTIAL' as const,
+              price: execution.executedPrice
+            } 
+          : o
+      ))
+
+      // Record trade
+      const newTrade: Trade = {
+        id: `T${Date.now()}`,
+        symbol: selectedSymbol,
+        side: orderSide,
+        price: execution.executedPrice,
+        qty: execution.executedQty,
+        time: new Date().toLocaleTimeString('en-US', { hour12: false })
+      }
+      setTrades(prev => [newTrade, ...prev].slice(0, 100))
+
+      // Add to account context
+      account.addTrade({
+        id: newTrade.id,
+        symbol: selectedSymbol,
+        quantity: execution.executedQty,
+        executionPrice: execution.executedPrice,
+        side: orderSide,
+        fee: executionFee,
+        timestamp: Date.now(),
+      }, accountType)
+
+      // Update position
+      updatePosition(selectedSymbol, orderSide, execution.executedQty, execution.executedPrice, accountType)
+
+      addNotification(
+        'trade',
+        `Order ${isFilled ? 'Filled' : 'Partially Filled'} / 订单${isFilled ? '成交' : '部分成交'}`,
+        `${orderSide} ${execution.executedQty.toFixed(4)} ${selectedSymbol} @ ${formatCurrency(execution.executedPrice)}`,
+        { symbol: selectedSymbol, side: orderSide, qty: execution.executedQty, price: execution.executedPrice }
+      )
+
+      if (execution.partialFill) {
+        addNotification('warning', 'Partial Fill / 部分成交', 
+          `Only ${execution.executedQty.toFixed(4)} of ${qty} filled. Remaining ${(qty - execution.executedQty).toFixed(4)} cancelled.`)
+      }
+    }, executionDelay)
     
     setOrderQty('')
     if (orderType !== 'LIMIT') setOrderPrice('')
   }
   
-  // 更新持仓 / Update position
-  const updatePosition = (symbol: string, side: 'BUY' | 'SELL', qty: number, price: number) => {
+  // Enhanced position update with account context
+  const updatePosition = (symbol: string, side: 'BUY' | 'SELL', qty: number, price: number, _accountType: 'crypto' | 'equity') => {
     setPositions(prev => {
       const existing = prev.find(p => p.symbol === symbol)
       if (existing) {
         const newQty = side === 'BUY' ? existing.qty + qty : existing.qty - qty
         if (Math.abs(newQty) < 0.0001) {
-          // 平仓 / Close position
+          // Close position
           return prev.filter(p => p.symbol !== symbol)
         }
         const newAvgPrice = side === 'BUY' 
           ? (existing.avgPrice * existing.qty + price * qty) / (existing.qty + qty)
           : existing.avgPrice
+        
+        const currentPrice = priceData[symbol]?.price || price
+        const unrealizedPnL = (currentPrice - newAvgPrice) * newQty
+
         return prev.map(p => p.symbol === symbol ? {
           ...p,
           qty: newQty,
           avgPrice: newAvgPrice,
-          currentPrice: price,
-          pnl: (price - newAvgPrice) * newQty,
-          pnlPercent: ((price - newAvgPrice) / newAvgPrice) * 100,
-          value: Math.abs(newQty * price)
+          currentPrice: currentPrice,
+          pnl: unrealizedPnL,
+          pnlPercent: ((currentPrice - newAvgPrice) / newAvgPrice) * 100,
+          value: Math.abs(newQty * currentPrice)
         } : p)
       } else if (side === 'BUY') {
-        // 新开仓 / New position
+        const currentPrice = priceData[symbol]?.price || price
         return [...prev, {
           symbol,
           qty,
           avgPrice: price,
-          currentPrice: price,
+          currentPrice,
           pnl: 0,
           pnlPercent: 0,
-          value: qty * price
+          value: qty * currentPrice
         }]
       }
       return prev
@@ -699,6 +788,17 @@ export function TradingTerminal() {
   const totalPositionValue = positions.reduce((sum, p) => sum + p.value, 0)
   const activeOrdersCount = orders.filter(o => o.status === 'NEW' || o.status === 'PARTIAL').length
 
+  // Get market status for selected symbol
+  const currentMarketStatus = getMarketStatus(selectedSymbol)
+  
+  // Determine account type based on selected asset
+  const isCryptoAsset = CRYPTO_ASSETS.some(a => a.symbol === selectedSymbol)
+  const currentAccountType = isCryptoAsset ? 'crypto' : 'equity'
+  const selectedAccount = isCryptoAsset ? account.cryptoAccount : account.equityAccount
+  
+  // Calculate risk metrics for active position
+  const activePosition = positions.find(p => p.symbol === selectedSymbol)
+
   return (
     <div className="h-screen bg-[#0a0a0a] text-[#e0e0e0] font-mono text-xs flex flex-col overflow-hidden">
       {/* 全局导航栏 / Global Navigation */}
@@ -721,8 +821,28 @@ export function TradingTerminal() {
           </div>
           <span className="text-[#888]">SELECTED / 已选: <span className="text-white font-bold">{selectedSymbol}</span></span>
           <span className="text-[#888]">LEVERAGE / 杠杆: <span className="text-[#00aaff]">{leverage}x</span></span>
+          
+          {/* Market Status Badge - NEW */}
+          <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${
+            currentMarketStatus.status === 'OPEN' ? 'bg-[#00ff8830] text-[#00ff88]' : 
+            currentMarketStatus.status === 'AFTER_HOURS' ? 'bg-[#00aaff30] text-[#00aaff]' : 
+            currentMarketStatus.status === 'PRE_MARKET' ? 'bg-[#aa00ff30] text-[#aa00ff]' : 
+            'bg-[#ff444430] text-[#ff4444]'
+          }`}>
+            {currentMarketStatus.status.replace('_', ' ')}
+          </span>
+          
+          {/* Account Type Badge - NEW */}
+          <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${
+            currentAccountType === 'crypto' ? 'bg-[#ffaa0030] text-[#ffaa00]' : 'bg-[#00aaff30] text-[#00aaff]'
+          }`}>
+            {currentAccountType.toUpperCase()} ACCT
+          </span>
         </div>
         <div className="flex items-center gap-4">
+          {/* Account Equity Display - NEW */}
+          <span className="text-[#888]">EQUITY / 资产: <span className="text-[#00ff88]">{formatCurrency(selectedAccount.equity)}</span></span>
+          <span className="text-[#888]">CASH / 现金: <span className="text-white">{formatCurrency(selectedAccount.cash)}</span></span>
           <span className="text-[#888]">HOTKEYS / 快捷键: 
             <button onClick={() => setHotkeys(!hotkeys)} className={`ml-1 ${hotkeys ? 'text-[#00ff88]' : 'text-[#ff4444]'}`}>
               {hotkeys ? 'ON / 开' : 'OFF / 关'}
@@ -856,6 +976,14 @@ export function TradingTerminal() {
               showIndicators={true}
             />
           </div>
+
+          {/* Market Events Tags Row - NEW */}
+          {marketEvents.length > 0 && (
+            <div className="h-8 bg-[#0d0d0d] border-b border-[#1a1a1a] flex items-center px-3 gap-2 overflow-x-auto">
+              <span className="text-[#666] text-[9px]">EVENTS:</span>
+              <EventTags events={marketEvents} compact={true} />
+            </div>
+          )}
 
           {/* 订单簿 + 交易面板 */}
           <div className="flex-1 flex overflow-hidden">
@@ -993,7 +1121,9 @@ export function TradingTerminal() {
                   { key: 'positions', label: 'POSITIONS', count: positions.length },
                   { key: 'orders', label: 'ORDERS', count: activeOrdersCount },
                   { key: 'trades', label: 'TRADES', count: trades.length },
-                  { key: 'alerts', label: 'ALERTS', count: alerts.filter(a => a.active).length }
+                  { key: 'alerts', label: 'ALERTS', count: alerts.filter(a => a.active).length },
+                  { key: 'account', label: 'ACCOUNT', count: 0 },
+                  { key: 'risk', label: 'RISK', count: activePosition ? 1 : 0 }
                 ].map(tab => (
                   <button key={tab.key} onClick={() => setActiveTab(tab.key as any)} className={`flex items-center gap-1 ${activeTab === tab.key ? 'text-[#fff]' : 'text-[#666] hover:text-[#888]'}`}>
                     {tab.label}
@@ -1115,6 +1245,85 @@ export function TradingTerminal() {
                       </div>
                     ))}
                     <button className="w-full py-2 border border-dashed border-[#333] text-[#555] hover:border-[#555] hover:text-[#888] text-[10px] flex items-center justify-center gap-1"><Plus className="h-3 w-3" /> ADD ALERT</button>
+                  </div>
+                )}
+
+                {/* Account Breakdown Tab - NEW */}
+                {activeTab === 'account' && (
+                  <div className="p-3 space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <AccountBreakdown accountType="crypto" showChart={false} />
+                      <AccountBreakdown accountType="equity" showChart={false} />
+                    </div>
+                    
+                    {/* Market Status Section */}
+                    <div className="mt-4">
+                      <h4 className="text-[#888] text-[10px] mb-2">MARKET STATUS</h4>
+                      <MarketStatusBar symbol={selectedSymbol} />
+                    </div>
+                  </div>
+                )}
+
+                {/* Risk Metrics Tab - NEW */}
+                {activeTab === 'risk' && (
+                  <div className="p-3 space-y-3">
+                    {activePosition ? (
+                      <RiskMeter 
+                        position={{
+                          avgCostPrice: activePosition.avgPrice,
+                          currentPrice: activePosition.currentPrice,
+                          quantity: Math.abs(activePosition.qty),
+                          leverage: leverage,
+                          equity: selectedAccount.equity,
+                          side: activePosition.qty > 0 ? 'LONG' : 'SHORT'
+                        }}
+                        showDetails={true}
+                      />
+                    ) : (
+                      <div className="text-center text-[#666] py-8">
+                        <p className="text-sm mb-2">No active position for {selectedSymbol}</p>
+                        <p className="text-[10px]">Open a position to see risk metrics</p>
+                      </div>
+                    )}
+                    
+                    {/* PnL Breakdown for current account */}
+                    <div className="bg-[#111] p-3 border border-[#1a1a1a]">
+                      <h4 className="text-[#888] text-[10px] mb-3">PNL BREAKDOWN ({currentAccountType.toUpperCase()})</h4>
+                      <div className="space-y-2 text-[10px]">
+                        <div className="flex justify-between">
+                          <span className="text-[#666]">Unrealized PnL:</span>
+                          <span className={selectedAccount.unrealizedPnL >= 0 ? 'text-[#00ff88]' : 'text-[#ff4444]'}>
+                            {formatCurrency(selectedAccount.unrealizedPnL)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-[#666]">Realized PnL:</span>
+                          <span className={selectedAccount.realizedPnL >= 0 ? 'text-[#00ff88]' : 'text-[#ff4444]'}>
+                            {formatCurrency(selectedAccount.realizedPnL)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-[#666]">Total Fees:</span>
+                          <span className="text-[#ffaa00]">-{formatCurrency(selectedAccount.totalFees)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-[#666]">Funding Cost:</span>
+                          <span className="text-[#ffaa00]">-{formatCurrency(selectedAccount.totalFundingCost)}</span>
+                        </div>
+                        <div className="border-t border-[#222] pt-2 flex justify-between font-bold">
+                          <span className="text-[#888]">Net PnL:</span>
+                          <span className={
+                            (selectedAccount.unrealizedPnL + selectedAccount.realizedPnL - selectedAccount.totalFees - selectedAccount.totalFundingCost) >= 0 
+                              ? 'text-[#00ff88]' : 'text-[#ff4444]'
+                          }>
+                            {formatCurrency(
+                              selectedAccount.unrealizedPnL + selectedAccount.realizedPnL - 
+                              selectedAccount.totalFees - selectedAccount.totalFundingCost
+                            )}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
